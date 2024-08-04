@@ -1,9 +1,7 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+import gym
 from gym import spaces
 import pygame
-import time
 
 # Define actions
 LEFT = 0
@@ -48,13 +46,19 @@ SHAPE_MARKER_MAPPING = {
     ('agent', 'agent'): ('*', 'black')  # Star shape for the agent
 }
 
-class SignEnvironment:
+class SignEnvironment(gym.Env):  # Inherit from gym.Env
+    metadata = {'render.modes': ['human']}
+    
     def __init__(self, size=[10, 10], num_tasks=3, num_distractors=2):
+        super(SignEnvironment, self).__init__()
+        
         self.nrow, self.ncol = size
         self.nS = self.nrow * self.ncol
         self.num_tasks = num_tasks
         self.num_distractors = num_distractors
-        self.action_space = spaces.Discrete(4)
+        self.action_space = spaces.Discrete(4)  # Four discrete actions: LEFT, DOWN, RIGHT, UP
+        self.observation_space = spaces.Box(low=0, high=3, shape=(self.nrow, self.ncol), dtype=np.int32)  # Grid observation
+
         self.screen = None  # To hold the pygame screen
         self.cell_size = 50  # Size of each cell in pixels
 
@@ -184,7 +188,7 @@ class SignEnvironment:
 
         return grid
 
-    def render(self):
+    def render(self, mode='human'):
         """Render the current environment state using pygame."""
         # Initialize pygame if not already initialized
         if self.screen is None:
@@ -255,16 +259,35 @@ class SignEnvironment:
                                  (center_x + self.cell_size // 8, center_y + self.cell_size // 4),
                                  (center_x - self.cell_size // 8, center_y + self.cell_size // 4)])
 
+    def close(self):
+        if self.screen is not None:
+            pygame.quit()
+            self.screen = None
 
-# Initialize the environment
+
+import gym
+from stable_baselines3 import PPO
+
+# Initialize your custom environment
 env = SignEnvironment(size=[10, 10], num_tasks=3, num_distractors=2)
 
-# Reset the environment
+# Create the PPO model
+model = PPO("MlpPolicy", env, verbose=1)
+
+# Train the model
+model.learn(total_timesteps=50000)
+
+# Save the model
+model.save("ppo_sign_environment")
+
+# Load the model
+model = PPO.load("ppo_sign_environment")
+
+# Evaluate the model
 obs = env.reset()
-done = False
-print("Initial observation:")
-while not done:
-    action = np.random.choice([0, 1, 2, 3])
-    new_obs, reward, done, info = env.step(action)
-    env.render()
-    print(f"Reward: {reward}, Done: {done}, Info: {info}")
+for _ in range(1000):
+    action, _states = model.predict(obs, deterministic=True)
+    obs, reward, done, info = env.step(action)
+    if done:
+        obs = env.reset()
+
