@@ -2,7 +2,8 @@ import numpy as np
 import gym
 from gym import spaces
 import pygame
-
+import os
+import matplotlib.pyplot as plt
 # Define actions
 LEFT = 0
 DOWN = 1
@@ -15,13 +16,16 @@ ACTIONS = [(-1, 0), (0, 1), (1, 0), (0, -1)]
 AGENT = 'agent'
 OBJECTS = ['biscuit', 'candy']
 
+NUM_SHAPES = 3  # square, circle, triangle
+NUM_TYPES = 2   # biscuit, candy
+
 # Shape encoding: square=0, circle=1, triangle=2
 SHAPE_MAPPING = {
     0: "square",
     1: "circle",
     2: "triangle"
 }
-
+SHAPE_MAPPING_REVERSE = {v: k for k, v in SHAPE_MAPPING.items()}
 # Color encoding: biscuit=blue, candy=red, agent=black
 COLOR_MAPPING = {
     'biscuit': 1,
@@ -45,7 +49,14 @@ SHAPE_MARKER_MAPPING = {
     ('triangle', 'candy'): ('^', 'red'),
     ('agent', 'agent'): ('*', 'black')  # Star shape for the agent
 }
-
+SHAPE_TYPE_MAPPING = {
+    (0, 0): 2,  # square_biscuit
+    (0, 1): 3,  # square_candy
+    (1, 0): 4,  # circle_biscuit
+    (1, 1): 5,  # circle_candy
+    (2, 0): 6,  # triangle_biscuit
+    (2, 1): 7   # triangle_candy
+}
 class SignEnvironment(gym.Env):  # Inherit from gym.Env
     metadata = {'render.modes': ['human']}
     
@@ -57,7 +68,21 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
         self.num_tasks = num_tasks
         self.num_distractors = num_distractors
         self.action_space = spaces.Discrete(4)  # Four discrete actions: LEFT, DOWN, RIGHT, UP
-        self.observation_space = spaces.Box(low=0, high=3, shape=(self.nrow, self.ncol), dtype=np.int32)  # Grid observation
+        obs_space = spaces.Box(low=0, high=8, shape=(self.nrow, self.ncol), dtype=np.float32)
+
+        # Goal space: one-hot encoded shape (8 classes)
+        goal_space = spaces.Discrete(8)
+
+        # Object type space: one-hot encoded type (2 classes)
+        # obj_type_space = spaces.MultiBinary(NUM_TYPES)
+
+        # Combine these into a Dict observation space
+        self.observation_space = spaces.Dict({
+            'obs': obs_space,
+            'goal': goal_space,
+        })
+
+        # self.observation_space = spaces.Box(low=0, high=3, shape=(self.nrow, self.ncol), dtype=np.int32)  # Grid observation
 
         self.screen = None  # To hold the pygame screen
         self.cell_size = 50  # Size of each cell in pixels
@@ -65,7 +90,7 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
         self.objects = []
         self.state = {}
         self.current_stage = 0
-
+        self.agent_path = []
         self.agent_initial_position = (self.nrow - 1, 0)
         self.sign_position = (0, self.ncol - 1)
         self.goals = self.generate_goals()  # Generate shape goals
@@ -77,13 +102,15 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
         return np.random.choice([0, 1, 2], self.num_tasks).tolist()
 
     def reset(self):
-        """Reset environment and set task sequence and current stage."""
+        """重置环境，并重新设置任务序列和当前任务阶段。"""
+        self.total_steps = 0  # 初始化总步数
         self.current_stage = 0
-        self.state['agent'] = self.agent_initial_position  # Fixed agent initial position
+        self.agent_path = []
+        self.state['agent'] = self.agent_initial_position  # 固定代理初始位置
         self.goals = self.generate_goals()
-        self.current_goal = self.goals[self.current_stage]  # Initial goal is the first shape
-        self.target_object_type = np.random.choice(OBJECTS)  # Choose target type at reset
-        self.initialize_objects()  # Initialize objects and distractors
+        self.current_goal = self.goals[self.current_stage]  # 初始目标设为当前阶段的形状
+        self.target_object_type = np.random.choice(OBJECTS)  # 在重置时选择目标类型
+        self.initialize_objects()  # 初始化物体和干扰项
         return self.get_obs()
 
     def initialize_objects(self):
@@ -135,27 +162,30 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
         row, col = pos[0] + act[0], pos[1] + act[1]
         if 0 <= row < self.nrow and 0 <= col < self.ncol:
             self.state['agent'] = (row, col)
+            self.agent_path.append((row, col))
 
     def step(self, action):
         self.move_agent(action)
+        self.total_steps += 1  # 记录总步数
         obs = self.get_obs()
         reward = self.compute_reward()
-        done = self.current_stage > self.num_tasks
+        done = self.current_stage > self.num_tasks or self.total_steps >= 1000  # 完成所有任务或达到最大步数时结束
         info = {'stage': self.current_stage}
         return obs, reward, done, info
+
 
     def compute_reward(self):
         agent_pos = self.state['agent']
 
-        # Stage 0: Reach the sign position
+        # 如果当前阶段为 0，并且到达标志位置，则进入下一个阶段
         if self.current_stage == 0 and agent_pos == self.sign_position:
             self.current_stage += 1
-            self.current_goal = self.goals[0]  # Target is the first task's shape when reaching the sign
-            return 1
+            self.current_goal = self.goals[0]  # 刚碰到标志时，目标为第一个任务的形状
+            return 0
 
-        # Stage 1-num_tasks: Interact with objects
+        # 阶段 1-num_tasks: 按顺序执行任务
         if 1 <= self.current_stage <= self.num_tasks:
-            current_shape = SHAPE_MAPPING[self.goals[self.current_stage - 1]]  # Update to current stage shape
+            current_shape = SHAPE_MAPPING[self.goals[self.current_stage - 1]]  # 更新为当前阶段对应的形状
             for obj, positions in self.state['object_positions'].items():
                 shape = obj.split('_')[0]
                 obj_type = obj.split('_')[1]
@@ -163,14 +193,67 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
                     if pos == agent_pos:
                         if shape == current_shape and obj_type == self.target_object_type:
                             self.current_stage += 1
-                            if self.current_stage < self.num_tasks:
-                                self.current_goal = self.goals[self.current_stage]  # Update to next target shape
-                            return 1  # Correct task completed
+                            if self.current_stage > self.num_tasks:
+                                # 完成所有任务，计算奖励
+                                return 100 * (1 - self.total_steps / 1000)
+                            else:
+                                self.current_goal = self.goals[self.current_stage-1]  # 更新为下一个目标形状
+                                return 0  # 完成正确任务但未完成所有任务时奖励为0
                         else:
-                            return -1  # Incorrect object touched
-        return 0  # No interaction
+                            return 0  # 碰到错误的物体时奖励为0
+        return 0  # 没有碰到任何物体时奖励为0
+
 
     def get_obs(self):
+        """获取当前环境观察。"""
+        # 初始化grid, 每个grid位置将包含有关形状和类型的编码
+        grid = np.zeros((self.nrow, self.ncol), dtype=int)
+
+        # 绘制agent位置
+        mapping = {
+        'square_biscuit': 2,
+        'circle_biscuit': 3,
+        'triangle_biscuit': 4,
+        'square_candy': 5,
+        'circle_candy': 6,
+        'triangle_candy': 7,
+        }
+    
+        # 定义特殊值
+        agent_value = 8
+        sign_value = 1
+
+        # 绘制objects位置，使用组合映射后的值
+        for obj, positions in self.state['object_positions'].items():
+            if '_' in obj:
+                shape_type = obj 
+                value = mapping.get(shape_type, 0)  
+                for pos in positions:
+                    grid[pos] = value
+
+        # 绘制agent位置，优先级最高
+        agent_pos = self.state['agent']
+        grid[agent_pos] = agent_value 
+
+        # 绘制sign位置
+        grid[self.sign_position] = sign_value
+
+        # 定义goal
+        goal_s = mapping.get(f"{SHAPE_MAPPING[self.current_goal]}_{self.target_object_type}", 0)
+        if self.current_stage == 0:
+            goal = 1
+        else:
+            goal = goal_s
+
+        obs = {
+            'obs': grid,  # 包含物体的形状和类型信息的grid
+            'goal': goal,  # 当前要寻找的目标形状
+        }
+
+        return obs
+
+
+    def get_obs_2(self):
         """Get current environment observation."""
         grid = np.zeros((self.nrow, self.ncol), dtype=int)
 
@@ -185,30 +268,54 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
                 if '_' in obj_type:
                     _, obj_type = obj_type.split('_')
                 grid[pos] = COLOR_MAPPING.get(obj_type, 0)
+        
+        goal_encoding = np.zeros(NUM_SHAPES, dtype=np.float32)
+        goal_encoding[self.current_goal] = 1
+        goal = goal_encoding
+        
+        # Set object type
+        type_encoding = np.zeros(NUM_TYPES, dtype=np.float32)
+        type_encoding[OBJECTS.index(self.target_object_type)] = 1
+        obj_type = type_encoding
 
-        return grid
+        if self.is_looking_for_sign:
+            goal = np.zeros(NUM_SHAPES, dtype=np.float32)  # 初始保持0或默认状态
+            obj_type = np.zeros(NUM_TYPES, dtype=np.float32)  # 初始保持0或默认状态
+        else:
+            goal = goal_encoding  # 正常的目标编码
+            obj_type = type_encoding  # 正常的类型编码
 
-    def render(self, mode='human'):
-        """Render the current environment state using pygame."""
+        obs = {
+        'obs': grid,
+        'goal': goal, 
+        }
+
+        return obs
+
+    def render(self, mode='human', show_on_screen=False):
+        """Render the current environment state, optionally showing it on the screen."""
         # Initialize pygame if not already initialized
         if self.screen is None:
             pygame.init()
             window_size = (self.ncol * self.cell_size, self.nrow * self.cell_size)
-            self.screen = pygame.display.set_mode(window_size)
-            pygame.display.set_caption("Sign Environment")
+            if show_on_screen:
+                self.screen = pygame.display.set_mode(window_size)  # Create a window if showing on screen
+                pygame.display.set_caption("Sign Environment")
+            else:
+                self.screen = pygame.Surface(window_size)  # Create an off-screen surface
 
         # Fill the screen with white background
         self.screen.fill((255, 255, 255))
 
-        # Render the grid
+        # Render the grid and objects
         for i in range(self.nrow):
             for j in range(self.ncol):
                 pygame.draw.rect(self.screen, (200, 200, 200),
-                                 pygame.Rect(j * self.cell_size, i * self.cell_size, self.cell_size, self.cell_size),
-                                 1)  # Draw grid lines
+                                pygame.Rect(j * self.cell_size, i * self.cell_size, self.cell_size, self.cell_size),
+                                1)  # Draw grid lines
 
                 # Determine the color and shape
-                cell_content = self.get_obs()[i, j]
+                cell_content = self.get_obs_2()['obs'][i, j]
                 if cell_content == COLOR_MAPPING['biscuit']:
                     shape = self.goals[self.current_stage - 1] if self.current_stage > 0 else self.goals[0]
                     shape_name = SHAPE_MAPPING[shape]
@@ -223,10 +330,10 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
                     # Draw the agent as a star
                     self.draw_shape('agent', 'black', i, j)
 
-        pygame.display.flip()
+        if show_on_screen:
+            pygame.display.flip()  # Update the display if showing on screen
 
-        # Pause for observation
-        pygame.time.wait(500)  # Wait for 500 milliseconds (0.5 seconds)
+        return self.screen
 
     def draw_shape(self, shape, color, i, j):
         """Draw the specified shape with the given color at grid location (i, j)."""
@@ -234,30 +341,55 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
         center_y = i * self.cell_size + self.cell_size // 2
         if shape == 'square':
             pygame.draw.rect(self.screen, color,
-                             (center_x - self.cell_size // 4, center_y - self.cell_size // 4,
-                              self.cell_size // 2, self.cell_size // 2))
+                            (center_x - self.cell_size // 4, center_y - self.cell_size // 4,
+                            self.cell_size // 2, self.cell_size // 2))
         elif shape == 'circle':
             pygame.draw.circle(self.screen, color, (center_x, center_y), self.cell_size // 4)
         elif shape == 'triangle':
             pygame.draw.polygon(self.screen, color,
                                 [(center_x, center_y - self.cell_size // 4),
-                                 (center_x - self.cell_size // 4, center_y + self.cell_size // 4),
-                                 (center_x + self.cell_size // 4, center_y + self.cell_size // 4)])
+                                (center_x - self.cell_size // 4, center_y + self.cell_size // 4),
+                                (center_x + self.cell_size // 4, center_y + self.cell_size // 4)])
         elif shape == 'agent':
             # Draw a star for the agent
             pygame.draw.circle(self.screen, color, (center_x, center_y), self.cell_size // 4)
             pygame.draw.polygon(self.screen, color,
                                 [(center_x, center_y - self.cell_size // 4),
-                                 (center_x - self.cell_size // 8, center_y + self.cell_size // 8),
-                                 (center_x + self.cell_size // 8, center_y + self.cell_size // 8)])
+                                (center_x - self.cell_size // 8, center_y + self.cell_size // 8),
+                                (center_x + self.cell_size // 8, center_y + self.cell_size // 8)])
             pygame.draw.polygon(self.screen, color,
                                 [(center_x - self.cell_size // 8, center_y),
-                                 (center_x + self.cell_size // 8, center_y - self.cell_size // 4),
-                                 (center_x - self.cell_size // 8, center_y - self.cell_size // 4)])
+                                (center_x + self.cell_size // 8, center_y - self.cell_size // 4),
+                                (center_x - self.cell_size // 8, center_y - self.cell_size // 4)])
             pygame.draw.polygon(self.screen, color,
                                 [(center_x + self.cell_size // 8, center_y),
-                                 (center_x + self.cell_size // 8, center_y + self.cell_size // 4),
-                                 (center_x - self.cell_size // 8, center_y + self.cell_size // 4)])
+                                (center_x + self.cell_size // 8, center_y + self.cell_size // 4),
+                                (center_x - self.cell_size // 8, center_y + self.cell_size // 4)])
+
+    def plot_agent_path(self, res_path="res/agent_path.png", show_on_screen=False):
+        """Plot and save the agent's path along with environment objects using Pygame."""
+        surface = self.render(show_on_screen=show_on_screen)  # Render the environment to an off-screen surface if not showing on screen
+
+        # Draw the agent's path
+        path_x, path_y = zip(*[(pos[1], pos[0]) for pos in self.agent_path])
+        for k in range(len(path_x) - 1):
+            start_pos = (path_x[k] * self.cell_size + self.cell_size // 2, path_y[k] * self.cell_size + self.cell_size // 2)
+            end_pos = (path_x[k+1] * self.cell_size + self.cell_size // 2, path_y[k+1] * self.cell_size + self.cell_size // 2)
+            pygame.draw.line(surface, (0, 0, 255), start_pos, end_pos, 2)  # Draw path with blue line
+            pygame.draw.circle(surface, (0, 0, 0), start_pos, self.cell_size // 8)  # Draw marker at each point
+
+        if show_on_screen:
+            pygame.display.flip()  # Update the display if showing on screen
+
+        # Create the 'res' directory if it doesn't exist
+        os.makedirs(os.path.dirname(res_path), exist_ok=True)
+
+        # Save the surface as an image
+        pygame.image.save(surface, res_path)
+
+        # Optionally, quit pygame to clean up resources
+        if not show_on_screen:
+            pygame.quit()
 
     def close(self):
         if self.screen is not None:
@@ -266,28 +398,44 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
 
 
 import gym
-from stable_baselines3 import PPO
-
+from stable_baselines3 import PPO, DQN
+import torch.nn as nn
 # Initialize your custom environment
-env = SignEnvironment(size=[10, 10], num_tasks=3, num_distractors=2)
-
+env = SignEnvironment(size=[5, 5], num_tasks=3, num_distractors=0)
+log_dir = "/home/ubuntu/logs/test/1.5e-5-0.2_55/"
 # Create the PPO model
-model = PPO("MlpPolicy", env, verbose=1)
-
+model = PPO("MultiInputPolicy",
+            env,
+            policy_kwargs=dict(log_std_init=-2, ortho_init=False, activation_fn=nn.ReLU, net_arch=[dict(pi=[256,256], vf=[256, 256])]),
+            n_steps=512,
+            batch_size=256,
+            n_epochs=20,
+            learning_rate=1.5e-5,
+            gamma=0.99,
+            clip_range=0.2,
+            ent_coef=0.0,
+            gae_lambda=0.9,
+            max_grad_norm=0.5,
+            verbose=1,
+            tensorboard_log=log_dir+"train/")
+# model = DQN("MultiInputPolicy", env, verbose=1, tensorboard_log="Cartpole_Original/", learning_rate=1e-4, batch_size=128)
 # Train the model
-model.learn(total_timesteps=50000)
+model.learn(total_timesteps=200000)
 
 # Save the model
-model.save("ppo_sign_environment")
+model.save("/home/ubuntu/logs/test_1.5e-5_0.2_55")
 
-# Load the model
-model = PPO.load("ppo_sign_environment")
+# # Load the model
+# model = PPO.load("/home/ubuntu/logs/ppo_model_1.5e-5")
 
-# Evaluate the model
-obs = env.reset()
-for _ in range(1000):
-    action, _states = model.predict(obs, deterministic=True)
-    obs, reward, done, info = env.step(action)
-    if done:
-        obs = env.reset()
+# # Evaluate the model
+# obs = env.reset()
+# done = False
+# while not done:
+#     action, _states = model.predict(obs, deterministic=True)
+#     obs, reward, done, info = env.step(action)
+#     print(reward)
+
+# env.plot_agent_path()  # 显示agent的运动路径
+# env.close()
 
