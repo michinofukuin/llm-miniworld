@@ -38,7 +38,14 @@ COLOR_DICT = {
     2: 'red',
     3: 'black'
 }
-
+mapping = {
+        'square_biscuit': 2,
+        'circle_biscuit': 3,
+        'triangle_biscuit': 4,
+        'square_candy': 5,
+        'circle_candy': 6,
+        'triangle_candy': 7,
+        }
 # Shape and color mapping to matplotlib markers
 SHAPE_MARKER_MAPPING = {
     ('square', 'biscuit'): ('s', 'blue'),
@@ -57,15 +64,15 @@ SHAPE_TYPE_MAPPING = {
     (2, 0): 6,  # triangle_biscuit
     (2, 1): 7   # triangle_candy
 }
+
 class SignEnvironment(gym.Env):  # Inherit from gym.Env
     metadata = {'render.modes': ['human']}
     
-    def __init__(self, size=[10, 10], num_tasks=3, num_distractors=2, seed=None):
+    def __init__(self, size=[10, 10], num_tasks=3, num_distractors=2):
         super(SignEnvironment, self).__init__()
-        if seed is not None:
-            self.set_seed(seed)
+        
         self.nrow, self.ncol = size
-        self._her = False
+        self._her = True
         self.nS = self.nrow * self.ncol
         self.num_tasks = num_tasks
         self.num_distractors = num_distractors
@@ -95,12 +102,11 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
 
         self.screen = None  # To hold the pygame screen
         self.cell_size = 50  # Size of each cell in pixels
-        self.max_step = 1000
         self.objects = []
         self.state = {}
         self.current_stage = 0
         self.agent_path = []
-        self.agent_initial_position = (0, 0)
+        self.agent_initial_position = (self.nrow - 1, self.ncol - 1)
         self.sign_position = (0, self.ncol - 1)
         self.goals = self.generate_goals()  # Generate shape goals
         self.current_goal = self.goals[0]  # Initial goal is the first shape
@@ -109,17 +115,6 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
     def generate_goals(self):
         """Generate task goals based on shapes."""
         return np.random.choice([0, 1, 2], self.num_tasks, replace=False).tolist()
-    
-    def set_seed(self, seed: int):
-        """设置环境的随机种子。"""
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        if hasattr(self.action_space, 'seed'):
-            self.action_space.seed(seed)
-        if hasattr(self.observation_space, 'seed'):
-            self.observation_space.seed(seed)
 
     def reset(self):
         """重置环境，并重新设置任务序列和当前任务阶段。"""
@@ -177,66 +172,87 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
         return (row, s - row * self.ncol)
 
     def move_agent(self, action):
+        prev_pos = self.state['agent']
         act = ACTIONS[action]
-        pos = self.state['agent']
-        row, col = pos[0] + act[0], pos[1] + act[1]
+        row, col = prev_pos[0] + act[0], prev_pos[1] + act[1]
+
         if 0 <= row < self.nrow and 0 <= col < self.ncol:
-            self.state['agent'] = (row, col)
-            self.agent_path.append((row, col))
+            new_pos = (row, col)
+            # 检查智能体是否卡住（即连续多次停留在同一位置）
+            if len(self.agent_path) > 3 and all(pos == prev_pos for pos in self.agent_path[-3:]):
+                # 强制选择一个随机不同的动作
+                action = np.random.choice([i for i in range(len(ACTIONS)) if i != action])
+                act = ACTIONS[action]
+                row, col = prev_pos[0] + act[0], prev_pos[1] + act[1]
+                if 0 <= row < self.nrow and 0 <= col < self.ncol:
+                    new_pos = (row, col)
+
+            self.state['agent'] = new_pos
+            self.agent_path.append(new_pos)
 
     def step(self, action):
         self.move_agent(action)
+        ob = self.get_obs()
+        ag = ob['achieved_goal']
+        dg = ob['desired_goal']
         self.total_steps += 1  # 记录总步数
-        reward = self.compute_reward()
-        obs = self.get_obs()
-        done = self.current_stage > self.num_tasks or self.total_steps >= self.max_step  # 完成所有任务或达到最大步数时结束
+        reward = self.compute_reward(ag, dg)
+        obs = self.get_obs(a=True)
+        done = self.current_stage > self.num_tasks or self.total_steps >= 1000  # 完成所有任务或达到最大步数时结束
         info = {'stage': self.current_stage}
         return obs, reward, done, info
 
 
-    def compute_reward(self):
-        agent_pos = self.state['agent']
-
+    def compute_reward(self, achieved_goal=None, desired_goal=None, info=None):
         # 如果当前阶段为 0，并且到达标志位置，则进入下一个阶段
-        if self.current_stage == 0 and agent_pos == self.sign_position:
-            self.current_stage += 1
-            self.current_goal = self.goals[0]  # 刚碰到标志时，目标为第一个任务的形状
-            return 0
+        if np.array_equal(achieved_goal, desired_goal):
+            if self.current_stage == 0:
+                self.current_stage += 1
+                reward =1
+                return np.array([reward], dtype=np.float32)
+            else:
+                self.current_stage += 1
+                if self.current_stage > self.num_tasks:
+                    # 完成所有任务，计算奖励
+                    reward =10
+                    return np.array([reward], dtype=np.float32)
+                else:
+                    self.current_goal = self.goals[self.current_stage-1]  # 更新为下一个目标形状
+                    reward =1
+                    return np.array([reward], dtype=np.float32)  # 完成正确任务但未完成所有任务时奖励为0
+                
+        # # 阶段 1-num_tasks: 按顺序执行任务
+        # if 1 <= self.current_stage <= self.num_tasks:
+        #     goal_s = mapping.get(f"{SHAPE_MAPPING[self.current_goal]}_{self.target_object_type}", 0)
 
-        # 阶段 1-num_tasks: 按顺序执行任务
-        if 1 <= self.current_stage <= self.num_tasks:
-            current_shape = SHAPE_MAPPING[self.goals[self.current_stage - 1]]  # 更新为当前阶段对应的形状
-            for obj, positions in self.state['object_positions'].items():
-                shape = obj.split('_')[0]
-                obj_type = obj.split('_')[1]
-                for pos in positions:
-                    if pos == agent_pos:
-                        if shape == current_shape and obj_type == self.target_object_type:
-                            self.current_stage += 1
-                            if self.current_stage > self.num_tasks:
-                                # 完成所有任务，计算奖励
-                                return 1000 * (1 - self.total_steps / self.max_step)
-                            else:
-                                self.current_goal = self.goals[self.current_stage-1]  # 更新为下一个目标形状
-                                return 0  # 完成正确任务但未完成所有任务时奖励为0
-                        else:
-                            return 0  # 碰到错误的物体时奖励为0
-        return 0  # 没有碰到任何物体时奖励为0
+        #     current_shape = SHAPE_MAPPING[self.goals[self.current_stage - 1]]  # 更新为当前阶段对应的形状
+        #     for obj, positions in self.state['object_positions'].items():
+        #         shape = obj.split('_')[0]
+        #         obj_type = obj.split('_')[1]
+        #         for pos in positions:
+        #             if pos == agent_pos:
+        #                 if shape == current_shape and obj_type == self.target_object_type:
+        #                     self.current_stage += 1
+        #                     if self.current_stage > self.num_tasks:
+        #                         # 完成所有任务，计算奖励
+        #                         return 1000 * (1 - self.total_steps / 1000)
+        #                     else:
+        #                         self.current_goal = self.goals[self.current_stage-1]  # 更新为下一个目标形状
+        #                         return 0  # 完成正确任务但未完成所有任务时奖励为0
+        #                 else:
+        #                     return 0  # 碰到错误的物体时奖励为0
+        reward = -1
+        return np.array([reward], dtype=np.float32)
+        
+ 
 
-    def get_obs(self):
+
+    def get_obs(self, a=False):
         """获取当前环境观察。"""
         # 初始化grid, 每个grid位置将包含有关形状和类型的编码
         grid = np.zeros((self.nrow, self.ncol), dtype=int)
 
         # 绘制agent位置
-        mapping = {
-        'square_biscuit': 2,
-        'circle_biscuit': 3,
-        'triangle_biscuit': 4,
-        'square_candy': 5,
-        'circle_candy': 6,
-        'triangle_candy': 7,
-        }
     
         # 定义特殊值
         agent_value = 8
@@ -254,11 +270,12 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
         grid[self.sign_position] = sign_value
         agent_pos = self.state['agent']
         achieved_goal = grid[agent_pos[0], agent_pos[1]]
-        grid[agent_pos] = agent_value 
+        if a is not False:
+             grid[agent_pos] = agent_value 
         # 定义goal
         goal_s = mapping.get(f"{SHAPE_MAPPING[self.current_goal]}_{self.target_object_type}", 0)
         if self.current_stage == 0:
-            goal = 1
+            goal = sign_value
         else:
             goal = goal_s
         desired_goal = goal
@@ -322,10 +339,6 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
         # Fill the screen with white background
         self.screen.fill((255, 255, 255))
 
-        # Get the current observation to use for rendering
-        obs = self.get_obs()
-        grid = obs['obs'] if not self._her else obs['observation']  # Adjust based on HER or not
-
         # Render the grid and objects
         for i in range(self.nrow):
             for j in range(self.ncol):
@@ -333,18 +346,21 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
                                 pygame.Rect(j * self.cell_size, i * self.cell_size, self.cell_size, self.cell_size),
                                 1)  # Draw grid lines
 
-                # Determine the content of the cell and draw accordingly
-                cell_value = grid[i, j]
-                if cell_value == 1:  # Sign
-                    self.draw_shape('sign', 'yellow', i, j)
-                elif cell_value == 8:  # Agent
+                # Determine the color and shape
+                cell_content = self.get_obs_2()['obs'][i, j]
+                if cell_content == COLOR_MAPPING['biscuit']:
+                    shape = self.goals[self.current_stage - 1] if self.current_stage > 0 else self.goals[0]
+                    shape_name = SHAPE_MAPPING[shape]
+                    color = COLOR_DICT[COLOR_MAPPING['biscuit']]
+                    self.draw_shape(shape_name, color, i, j)
+                elif cell_content == COLOR_MAPPING['candy']:
+                    shape = self.goals[self.current_stage - 1] if self.current_stage > 0 else self.goals[0]
+                    shape_name = SHAPE_MAPPING[shape]
+                    color = COLOR_DICT[COLOR_MAPPING['candy']]
+                    self.draw_shape(shape_name, color, i, j)
+                elif (i, j) == self.state['agent']:
+                    # Draw the agent as a star
                     self.draw_shape('agent', 'black', i, j)
-                else:
-                    shape_type = {v: k for k, v in self.mapping.items()}.get(cell_value, None)
-                    if shape_type:
-                        shape, obj_type = shape_type.split('_')
-                        color = COLOR_DICT[COLOR_MAPPING[obj_type]]
-                        self.draw_shape(shape, color, i, j)
 
         if show_on_screen:
             pygame.display.flip()  # Update the display if showing on screen
@@ -355,117 +371,57 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
         """Draw the specified shape with the given color at grid location (i, j)."""
         center_x = j * self.cell_size + self.cell_size // 2
         center_y = i * self.cell_size + self.cell_size // 2
-        color_rgb = pygame.Color(color)
-
         if shape == 'square':
-            pygame.draw.rect(self.screen, color_rgb,
+            pygame.draw.rect(self.screen, color,
                             (center_x - self.cell_size // 4, center_y - self.cell_size // 4,
                             self.cell_size // 2, self.cell_size // 2))
         elif shape == 'circle':
-            pygame.draw.circle(self.screen, color_rgb, (center_x, center_y), self.cell_size // 4)
+            pygame.draw.circle(self.screen, color, (center_x, center_y), self.cell_size // 4)
         elif shape == 'triangle':
-            pygame.draw.polygon(self.screen, color_rgb,
+            pygame.draw.polygon(self.screen, color,
                                 [(center_x, center_y - self.cell_size // 4),
                                 (center_x - self.cell_size // 4, center_y + self.cell_size // 4),
                                 (center_x + self.cell_size // 4, center_y + self.cell_size // 4)])
-        elif shape == 'sign':
-            pygame.draw.circle(self.screen, color_rgb, (center_x, center_y), self.cell_size // 2, 2)
         elif shape == 'agent':
             # Draw a star for the agent
-            pygame.draw.circle(self.screen, color_rgb, (center_x, center_y), self.cell_size // 4)
-            pygame.draw.polygon(self.screen, color_rgb,
+            pygame.draw.circle(self.screen, color, (center_x, center_y), self.cell_size // 4)
+            pygame.draw.polygon(self.screen, color,
                                 [(center_x, center_y - self.cell_size // 4),
                                 (center_x - self.cell_size // 8, center_y + self.cell_size // 8),
                                 (center_x + self.cell_size // 8, center_y + self.cell_size // 8)])
-            pygame.draw.polygon(self.screen, color_rgb,
+            pygame.draw.polygon(self.screen, color,
                                 [(center_x - self.cell_size // 8, center_y),
                                 (center_x + self.cell_size // 8, center_y - self.cell_size // 4),
                                 (center_x - self.cell_size // 8, center_y - self.cell_size // 4)])
-            pygame.draw.polygon(self.screen, color_rgb,
+            pygame.draw.polygon(self.screen, color,
                                 [(center_x + self.cell_size // 8, center_y),
                                 (center_x + self.cell_size // 8, center_y + self.cell_size // 4),
                                 (center_x - self.cell_size // 8, center_y + self.cell_size // 4)])
 
-
-    import pygame
-    import os
-
     def plot_agent_path(self, res_path="res/agent_path.png", show_on_screen=False):
         """Plot and save the agent's path along with environment objects using Pygame."""
-        
-        # Initialize pygame if not already initialized
-        if self.screen is None:
-            pygame.init()
-            window_size = (self.ncol * self.cell_size, self.nrow * self.cell_size)
-            if show_on_screen:
-                self.screen = pygame.display.set_mode(window_size)  # Create a window if showing on screen
-                pygame.display.set_caption("Sign Environment")
-            else:
-                self.screen = pygame.Surface(window_size)  # Create an off-screen surface
+        surface = self.render(show_on_screen=show_on_screen)  # Render the environment to an off-screen surface if not showing on screen
 
-        # Fill the screen with white background
-        self.screen.fill((255, 255, 255))
-
-        # Render the grid, objects, and sign
-        for i in range(self.nrow):
-            for j in range(self.ncol):
-                pygame.draw.rect(self.screen, (200, 200, 200),
-                                pygame.Rect(j * self.cell_size, i * self.cell_size, self.cell_size, self.cell_size),
-                                1)  # Draw grid lines
-
-                # Draw sign
-                cell_content = self.get_obs()['obs'][i, j]
-                if cell_content == 1:  # Sign
-                    pygame.draw.circle(self.screen, (255, 255, 0),
-                                    (j * self.cell_size + self.cell_size // 2, i * self.cell_size + self.cell_size // 2),
-                                    self.cell_size // 4, 2)
-                elif 2 <= cell_content <= 7:  # Objects
-                    color = (0, 0, 255) if cell_content in [2, 3, 4] else (255, 0, 0)
-                    pygame.draw.circle(self.screen, color,
-                                    (j * self.cell_size + self.cell_size // 2, i * self.cell_size + self.cell_size // 2),
-                                    self.cell_size // 4)
-                elif cell_content == 8:  # Agent
-                    pygame.draw.polygon(self.screen, (0, 0, 0),
-                                        [(j * self.cell_size + self.cell_size // 2, i * self.cell_size + self.cell_size // 4),
-                                        (j * self.cell_size + self.cell_size // 4, i * self.cell_size + 3 * self.cell_size // 4),
-                                        (j * self.cell_size + 3 * self.cell_size // 4, i * self.cell_size + 3 * self.cell_size // 4)])
-
-        # Draw the agent's path with arrows, ensuring it does not overlap with objects
+        # Draw the agent's path
         path_x, path_y = zip(*[(pos[1], pos[0]) for pos in self.agent_path])
         for k in range(len(path_x) - 1):
             start_pos = (path_x[k] * self.cell_size + self.cell_size // 2, path_y[k] * self.cell_size + self.cell_size // 2)
             end_pos = (path_x[k+1] * self.cell_size + self.cell_size // 2, path_y[k+1] * self.cell_size + self.cell_size // 2)
-            pygame.draw.line(self.screen, (0, 0, 255), start_pos, end_pos, 2)
-            # Draw arrowhead
-            arrow_size = self.cell_size // 8
-            angle = pygame.math.Vector2(end_pos[0] - start_pos[0], end_pos[1] - start_pos[1]).angle_to((1, 0))
-            pygame.draw.polygon(self.screen, (0, 0, 255),
-                                [(end_pos[0] + arrow_size * pygame.math.cos(angle + 135),
-                                end_pos[1] + arrow_size * pygame.math.sin(angle + 135)),
-                                (end_pos[0] + arrow_size * pygame.math.cos(angle - 135),
-                                end_pos[1] + arrow_size * pygame.math.sin(angle - 135)),
-                                end_pos])
+            pygame.draw.line(surface, (0, 0, 255), start_pos, end_pos, 2)  # Draw path with blue line
+            pygame.draw.circle(surface, (0, 0, 0), start_pos, self.cell_size // 8)  # Draw marker at each point
 
-        # Draw the agent's initial position as a star
-        initial_pos = self.agent_initial_position
-        pygame.draw.polygon(self.screen, (0, 0, 0),
-                            [(initial_pos[1] * self.cell_size + self.cell_size // 2, initial_pos[0] * self.cell_size + self.cell_size // 4),
-                            (initial_pos[1] * self.cell_size + self.cell_size // 4, initial_pos[0] * self.cell_size + 3 * self.cell_size // 4),
-                            (initial_pos[1] * self.cell_size + 3 * self.cell_size // 4, initial_pos[0] * self.cell_size + 3 * self.cell_size // 4)])
+        if show_on_screen:
+            pygame.display.flip()  # Update the display if showing on screen
+
+        # Create the 'res' directory if it doesn't exist
+        os.makedirs(os.path.dirname(res_path), exist_ok=True)
 
         # Save the surface as an image
-        os.makedirs(os.path.dirname(res_path), exist_ok=True)
-        pygame.image.save(self.screen, res_path)
-
-        # Optionally show the plot on the screen
-        if show_on_screen:
-            pygame.display.flip()
+        pygame.image.save(surface, res_path)
 
         # Optionally, quit pygame to clean up resources
         if not show_on_screen:
             pygame.quit()
-            self.screen = None
-
 
     def close(self):
         if self.screen is not None:
@@ -474,49 +430,52 @@ class SignEnvironment(gym.Env):  # Inherit from gym.Env
 
 
 import gym
-from stable_baselines3 import PPO, DQN
 import torch
 import random
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3 import PPO, DQN
+from stable_baselines3 import HerReplayBuffer, DDPG, DQN, SAC, TD3
+from stable_baselines3.her.goal_selection_strategy import GoalSelectionStrategy
 import torch.nn as nn
-# Initialize your custom environment
 seed = 42
 random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
-env = SignEnvironment(size=[4, 4], num_tasks=3, num_distractors=0,seed=42)
-test_env = SignEnvironment(size=[4, 4], num_tasks=3, num_distractors=0,seed=0)
+
+# Initialize your custom environment
+env = SignEnvironment(size=[5, 5], num_tasks=3, num_distractors=0)
 log_dir = "logs_llm/test/1.5e-5-0.2_55/"
-model_dir = "logs_llm/eval_model/1.5e-5-0.2_55/"
 # Create the PPO model
-eval_callback = EvalCallback(eval_env=test_env, best_model_save_path=model_dir, log_path=log_dir+"evaluate/",
-                                 eval_freq=10000, n_eval_episodes=5, deterministic=True, render=False)
-model = PPO("MultiInputPolicy",
-            env,
-            device="cuda:0",
-            policy_kwargs=dict(log_std_init=-2, ortho_init=False, activation_fn=nn.ReLU, net_arch=[dict(pi=[256,256], vf=[256, 256])]),
-            n_steps=512,
-            batch_size=128,
-            n_epochs=20,
-            learning_rate=4e-5,
-            gamma=0.99,
-            clip_range=0.2,
-            ent_coef=0.0,
-            gae_lambda=0.9,
-            max_grad_norm=0.5,
-            verbose=1,
-            seed=seed,
-            tensorboard_log=log_dir+"train/")
-# model = DQN("MultiInputPolicy", env, verbose=1, tensorboard_log=log_dir+"train/", learning_rate=2e-5, batch_size=128, device="cuda:1")
+goal_selection_strategy = "future" # equivalent to GoalSelectionStrategy.FUTURE
+
+# Initialize the model
+model = DQN(
+    "MultiInputPolicy",
+    env,
+    replay_buffer_class=HerReplayBuffer,
+    # Parameters for HER
+    replay_buffer_kwargs=dict(
+        n_sampled_goal=4,
+        goal_selection_strategy=goal_selection_strategy,
+    ),
+    verbose=1,
+    tensorboard_log=log_dir+"train/", 
+    learning_rate=2e-5, 
+    learning_starts=5000,
+    buffer_size=20000,
+    batch_size=256, 
+    device="cuda:1",
+    seed=seed,
+)
+
 # Train the model
-model.learn(total_timesteps=600000, callback=eval_callback)
+model.learn(50000)
 
 # Save the model
-model.save("logs_llm/4_4_3/4e-5-0.2")
+model.save("logs_llm/her_3")
 
 # # Load the model
-# model = PPO.load("/mnt/data/chenhaosheng/logs_llm/4e-5-0.2.zip")
+# model = PPO.load("/mnt/data/chenhaosheng/logs_llm/ppo.zip")
 
 # # Evaluate the model
 # obs = env.reset()
@@ -524,9 +483,8 @@ model.save("logs_llm/4_4_3/4e-5-0.2")
 # while not done:
 #     action, _states = model.predict(obs, deterministic=True)
 #     obs, reward, done, info = env.step(action)
+#     print(obs['obs'])
 
-
-# obs = env.reset()
 # env.plot_agent_path()  # 显示agent的运动路径
 # env.close()
 
