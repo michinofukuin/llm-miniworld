@@ -135,7 +135,7 @@ class RewardMachineEnv(gym.Wrapper):
                 'goal': next_obs_dict['goal'].astype(np.uint8),  # Access 'goal' from the first dict in the tuple
                 'rm-state': rm_feat.astype(np.uint8)  # Add the reward machine state
             }
-            npc =  rm_obs = {
+            npc = {
                 'obs': next_obs_dict['obs'].astype(np.uint8),  # Access 'obs' from the first dict in the tuple
                 'goal': next_obs_dict['goal'].astype(np.uint8),  # Access 'goal' from the first dict in the tuple
             }
