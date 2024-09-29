@@ -1,0 +1,12 @@
+0   # initial state
+[5]  # terminal state
+(0,0,'!c',ConstantRewardFunction(0))
+(0,1,'c',ConstantRewardFunction(1.51385498046875))
+(1,1,'!e',ConstantRewardFunction(0))
+(1,2,'e',ConstantRewardFunction(6.70074462890625))
+(2,2,'!f',ConstantRewardFunction(0))
+(2,3,'f',ConstantRewardFunction(11.1867822265625))
+(3,3,'!g',ConstantRewardFunction(0))
+(3,4,'g',ConstantRewardFunction(9.6553955078125))
+(4,4,'!a',ConstantRewardFunction(0))
+(4,5,'a',ConstantRewardFunction(904.078857421875))

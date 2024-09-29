@@ -1,0 +1,32 @@
+This environment is based on the work by P. Wawrzyński in “A Cat-Like Robot Real-Time Learning to Run”. The HalfCheetah is a 2-dimensional robot consisting of 9 links and 8 joints connecting them (including two paws). The goal is to apply a torque on the joints to make the cheetah run forward (right) as fast as possible, with a positive reward allocated based on the distance moved forward and a negative reward allocated for moving backward. The torso and head of the cheetah are fixed, and the torque can only be applied on the other 6 joints over the front and back thighs (connecting to the torso), shins (connecting to the thighs) and feet (connecting to the shins). In this game, you need to control the robot move forward and reach the goal where the robot's x_position > 10, the robot's startining position is x_posiiton = 0. x_position is int info['x_position']
+Design events for the task:
+def get_events(self):
+    events = ''
+    if self.info['x_position'] < -10:
+        events+='b'
+    if self.info['x_position'] > 10:
+        events+='a'
+    if self.info['x_position'] < -2:
+        events+='d'
+    if self.info['x_position'] > 2:
+        events+='c'
+    if self.info['x_position'] > 4:
+        events+='e'
+    if self.info['x_position'] > 6:
+        events+='f'
+    if self.info['x_position'] > 8:
+        events+='g'
+    return events
+Design reward machine for the task:
+0   # initial state
+[5]  # terminal state
+(0,0,'!c',RewardControl())
+(0,1,'c',RewardControl())
+(1,1,'!e',RewardControl())
+(1,2,'e',RewardControl())
+(2,2,'!f',RewardControl())
+(2,3,'f',RewardControl())
+(3,3,'!g',RewardControl())
+(3,4,'g',RewardControl())
+(4,4,'!a',RewardControl())
+(4,5,'a',ConstantRewardFunction(1000))

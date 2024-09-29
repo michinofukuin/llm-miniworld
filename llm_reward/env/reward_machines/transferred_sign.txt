@@ -1,0 +1,10 @@
+0
+[4]
+(0,0,'!a',ConstantRewardFunction(0))
+(0,1,'a',ConstantRewardFunction(57.97092291259764))
+(1,1,'!b',ConstantRewardFunction(0))
+(1,2,'b',ConstantRewardFunction(26.03126092529294))
+(2,2,'!c',ConstantRewardFunction(0))
+(2,3,'c',ConstantRewardFunction(0.4531133422851781))
+(3,3,'!d',ConstantRewardFunction(0))
+(3,4,'d',ConstantRewardFunction(840.79694))
